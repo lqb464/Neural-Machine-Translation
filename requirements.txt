@@ -1,0 +1,21 @@
+# Thư viện xử lý dữ liệu
+pandas
+numpy
+
+# Thư viện trực quan hóa dữ liệu
+matplotlib
+seaborn
+
+# Thư viện xử lý sơ bộ dữ liệu và đếm từ
+underthesea
+
+# Thư viện để xây dựng mô hình dịch máy
+torch
+
+# Thư viện để đánh giá mô hình dịch máy
+wandb
+
+# Thư viện để build app
+unicorn
+fastapi
+streamlit
