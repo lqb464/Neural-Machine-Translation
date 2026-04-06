@@ -28,7 +28,7 @@ def train():
 
     # 2. Chuẩn bị Data
     print("Đang nạp dữ liệu...")
-    df = pd.read_json("data/raw/train.json") 
+    df = pd.read_json("/kaggle/input/datasets/lqb464/dataset/train.json") 
     
     en_vocab = Vocab(name="English")
     en_vocab.build_vocab(df['en'].values, max_vocab_size=config.en_vocab_size)
