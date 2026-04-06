@@ -111,39 +111,25 @@ class Seq2Seq(nn.Module):
         self.device = device
         
     def forward(self, src, tgt, teacher_forcing_ratio=0.5):
-        # src: [batch_size, seq_len] -> Câu tiếng Anh
-        # tgt: [batch_size, seq_len] -> Câu tiếng Việt chuẩn (Ground Truth)
-        
-        batch_size = src.shape[0]
-        max_len = tgt.shape[1]
-        tgt_vocab_size = self.decoder.out.out_features
-        
-        # Tensor lưu trữ toàn bộ dự đoán của Decoder
-        outputs = torch.zeros(max_len, batch_size, tgt_vocab_size).to(self.device)
-        
-        # 1. Đẩy câu tiếng Anh qua Encoder
-        encoder_outputs, hidden = self.encoder(src)
-        
-        # 2. Token đầu tiên đưa vào Decoder luôn là <SOS>
-        decoder_input = tgt[:, 0].unsqueeze(1) # [batch_size, 1]
-        
-        # 3. Lặp qua từng bước thời gian để Decoder dịch từng từ
-        for t in range(1, max_len):
-            # Dự đoán từ tiếp theo
-            prediction, hidden, _ = self.decoder(decoder_input, hidden, encoder_outputs)
+            batch_size = src.shape[0]
+            max_len = tgt.shape[1]
+            tgt_vocab_size = self.decoder.out.out_features
             
-            # Lưu dự đoán vào tensor outputs
-            outputs[t] = prediction
+            # SỬA TẠI ĐÂY: Khởi tạo với batch_size ở chiều đầu tiên
+            # [batch_size, seq_len, vocab_size]
+            outputs = torch.zeros(batch_size, max_len, tgt_vocab_size).to(self.device)
             
-            # Lấy từ có xác suất cao nhất mà mô hình vừa đoán
-            top1 = prediction.argmax(1) 
+            encoder_outputs, hidden = self.encoder(src)
+            decoder_input = tgt[:, 0].unsqueeze(1) 
             
-            # Quyết định xem có dùng Teacher Forcing hay không
-            use_teacher_forcing = random.random() < teacher_forcing_ratio
-            
-            # Nếu dùng Teacher Forcing: lấy từ chuẩn trong tập train làm đầu vào tiếp theo
-            # Nếu không: lấy từ mà mô hình vừa tự đoán ra
-            decoder_input = tgt[:, t].unsqueeze(1) if use_teacher_forcing else top1.unsqueeze(1)
-            
-        # Trả về outputs có kích thước [seq_len, batch_size, tgt_vocab_size]
-        return outputs
+            for t in range(1, max_len):
+                prediction, hidden, _ = self.decoder(decoder_input, hidden, encoder_outputs)
+                
+                # SỬA TẠI ĐÂY: Lưu dự đoán vào đúng vị trí của batch_first
+                outputs[:, t, :] = prediction
+                
+                top1 = prediction.argmax(1) 
+                use_teacher_forcing = random.random() < teacher_forcing_ratio
+                decoder_input = tgt[:, t].unsqueeze(1) if use_teacher_forcing else top1.unsqueeze(1)
+                
+            return outputs # Trả về [batch_size, seq_len, vocab_size]
