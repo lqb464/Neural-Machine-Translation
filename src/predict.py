@@ -8,8 +8,8 @@ class Translator:
         self.vi_vocab = vi_vocab
         
         # Tạo lại kiến trúc (Cần khớp với file train)
-        encoder = Encoder(20000, 256, 512).to(self.device)
-        decoder = Decoder(25000, 256, 512).to(self.device)
+        encoder = Encoder(len(self.en_vocab), 256, 512).to(self.device)
+        decoder = Decoder(len(self.vi_vocab), 256, 512).to(self.device)
         self.model = Seq2Seq(encoder, decoder, self.device).to(self.device)
         
         # Load trọng số đã train
