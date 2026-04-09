@@ -32,31 +32,23 @@ class Vocab:
                 
         print(f"Từ điển [{self.name}] đã được xây dựng với {self.num_words} từ.")
 
-    def encode(self, sentence, max_len):
-        """
-        Biến một câu (chuỗi chữ) thành một list các ID (số nguyên) và thực hiện Padding.
-        """
+    def encode(self, sentence, max_len, pad=False):
         words = str(sentence).split()
-        
-        # Khởi tạo list chứa ID, bắt đầu bằng <SOS>
         idx_list = [self.word2idx["<SOS>"]]
-        
-        # Thêm ID của các từ trong câu (nếu từ lạ thì dùng <UNK>)
+
         for word in words:
             idx_list.append(self.word2idx.get(word, self.word2idx["<UNK>"]))
-            
-        # Thêm <EOS> báo hiệu kết thúc câu
+
         idx_list.append(self.word2idx["<EOS>"])
-        
-        # Cắt bớt nếu câu quá dài
+
         if len(idx_list) > max_len:
             idx_list = idx_list[:max_len-1] + [self.word2idx["<EOS>"]]
-            
-        # Padding bằng <PAD> (ID = 0) nếu câu quá ngắn
-        padding_len = max_len - len(idx_list)
-        if padding_len > 0:
-            idx_list.extend([self.word2idx["<PAD>"]] * padding_len)
-            
+
+        if pad:
+            padding_len = max_len - len(idx_list)
+            if padding_len > 0:
+                idx_list.extend([self.word2idx["<PAD>"]] * padding_len)
+
         return idx_list
 
     def decode(self, idx_list):
@@ -68,32 +60,24 @@ class Vocab:
 
 class NMTDataset(Dataset):
     def __init__(self, df, src_vocab, tgt_vocab, src_col='en', tgt_col='vi', max_len=70):
-        """
-        Dataset quản lý việc nạp dữ liệu từ DataFrame vào PyTorch.
-        """
-        self.df = df
-        self.src_vocab = src_vocab
-        self.tgt_vocab = tgt_vocab
-        self.src_col = src_col
-        self.tgt_col = tgt_col
-        self.max_len = max_len
+        self.samples = []
+
+        src_sentences = df[src_col].tolist()
+        tgt_sentences = df[tgt_col].tolist()
+
+        for src_sentence, tgt_sentence in zip(src_sentences, tgt_sentences):
+            src_ids = src_vocab.encode(src_sentence, max_len=max_len, pad=False)
+            tgt_ids = tgt_vocab.encode(tgt_sentence, max_len=max_len, pad=False)
+            self.samples.append((src_ids, tgt_ids))
 
     def __len__(self):
-        return len(self.df)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        # Lấy câu ở hàng thứ idx
-        src_sentence = self.df.iloc[idx][self.src_col]
-        tgt_sentence = self.df.iloc[idx][self.tgt_col]
-        
-        # Biến chữ thành số
-        src_indices = self.src_vocab.encode(src_sentence, self.max_len)
-        tgt_indices = self.tgt_vocab.encode(tgt_sentence, self.max_len)
-        
-        # Chuyển thành Tensor kiểu Long (số nguyên) để nạp vào mô hình
+        src_ids, tgt_ids = self.samples[idx]
         return {
-            'src': torch.tensor(src_indices, dtype=torch.long),
-            'tgt': torch.tensor(tgt_indices, dtype=torch.long)
+            "src": src_ids,
+            "tgt": tgt_ids
         }
 
 

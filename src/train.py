@@ -1,16 +1,39 @@
 import os
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import pandas as pd
 import wandb
-import pickle
 from tqdm import tqdm
-from src.dataset import Vocab, get_dataloader
+
+from src.dataset import get_dataloader
 from src.model import Encoder, Decoder, Seq2Seq
 
+
+@torch.no_grad()
+def evaluate(model, dataloader, criterion, device):
+    model.eval()
+    total_loss = 0.0
+
+    for batch in dataloader:
+        src = batch["src"].to(device, non_blocking=True)
+        tgt = batch["tgt"].to(device, non_blocking=True)
+
+        with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+            output = model(src, tgt, teacher_forcing_ratio=0.0)
+            output_dim = output.shape[-1]
+
+            output_flatten = output[:, 1:, :].reshape(-1, output_dim)
+            tgt_flatten = tgt[:, 1:].reshape(-1)
+
+            loss = criterion(output_flatten, tgt_flatten)
+
+        total_loss += loss.item()
+
+    return total_loss / len(dataloader)
+
+
 def train():
-    # 1. Khởi tạo W&B
     wandb.init(
         project="neural-machine-translation",
         config={
@@ -19,90 +42,127 @@ def train():
             "batch_size": 64,
             "embed_dim": 256,
             "hidden_dim": 512,
-            "max_len": 70,
-            "en_vocab_size": 20000,
-            "vi_vocab_size": 25000
+            "num_workers": 4,
+            "teacher_forcing_ratio": 0.5,
+            "log_every": 100
         }
     )
+
     config = wandb.config
-    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Đang huấn luyện trên thiết bị: {DEVICE}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Training on device: {device}")
 
-    # 2. Chuẩn bị Data & Vocab
-    print("Đang nạp dữ liệu và xây dựng từ điển...")
-    df = pd.read_json("/kaggle/input/datasets/lqb464/dataset/train.json") 
-    
-    en_vocab = Vocab(name="English")
-    en_vocab.build_vocab(df['en'].values, max_vocab_size=config.en_vocab_size)
-    
-    vi_vocab = Vocab(name="Vietnamese")
-    vi_vocab.build_vocab(df['vi'].values, max_vocab_size=config.vi_vocab_size)
+    processed_dir = "/kaggle/input/datasets/lqb464/dataset/processed"
+    train_path = os.path.join(processed_dir, "train.pt")
+    val_path = os.path.join(processed_dir, "val.pt")
+    vocab_path = os.path.join(processed_dir, "vocabs.pt")
 
-    # Lưu từ điển NGAY để đảm bảo tính nhất quán
-    os.makedirs("weights", exist_ok=True)
-    with open("weights/en_vocab.pkl", "wb") as f:
-        pickle.dump(en_vocab, f)
-    with open("weights/vi_vocab.pkl", "wb") as f:
-        pickle.dump(vi_vocab, f)
+    print("Loading vocab...")
+    vocab_data = torch.load(vocab_path)
+    en_vocab_size = vocab_data["src_vocab"]["num_words"]
+    vi_vocab_size = vocab_data["tgt_vocab"]["num_words"]
+    pad_idx = vocab_data["special_tokens"]["pad"]
 
-    dataloader = get_dataloader(df, en_vocab, vi_vocab, batch_size=config.batch_size, max_len=config.max_len)
+    print("Building dataloaders...")
+    train_loader = get_dataloader(
+        train_path,
+        batch_size=config.batch_size,
+        shuffle=True,
+        num_workers=config.num_workers,
+        pad_idx=pad_idx
+    )
 
-    # 3. Khởi tạo Mô hình
-    encoder = Encoder(config.en_vocab_size, config.embed_dim, config.hidden_dim).to(DEVICE)
-    decoder = Decoder(config.vi_vocab_size, config.embed_dim, config.hidden_dim).to(DEVICE)
-    model = Seq2Seq(encoder, decoder, DEVICE).to(DEVICE)
+    val_loader = get_dataloader(
+        val_path,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
+        pad_idx=pad_idx
+    )
+
+    print(f"Train batches: {len(train_loader)}")
+    print(f"Val batches: {len(val_loader)}")
+
+    encoder = Encoder(en_vocab_size, config.embed_dim, config.hidden_dim).to(device)
+    decoder = Decoder(vi_vocab_size, config.embed_dim, config.hidden_dim).to(device)
+    model = Seq2Seq(encoder, decoder, device).to(device)
 
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
-    # PAD_IDX thường là 0, ignore_index giúp mô hình không học cách dự đoán các từ đệm
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
+    criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
+    scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
 
-    # 4. Loop Training
-    print("Bắt đầu huấn luyện...")
+    os.makedirs("weights", exist_ok=True)
+
+    best_val_loss = float("inf")
+    global_step = 0
+
     for epoch in range(config.epochs):
         model.train()
-        total_loss = 0
-        
-        # Thêm tqdm để theo dõi tiến độ ngay tại Terminal
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config.epochs}")
-        
+        total_train_loss = 0.0
+        epoch_start = time.time()
+
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{config.epochs}")
+
         for batch in progress_bar:
-            src = batch['src'].to(DEVICE)
-            tgt = batch['tgt'].to(DEVICE)
+            src = batch["src"].to(device, non_blocking=True)
+            tgt = batch["tgt"].to(device, non_blocking=True)
 
-            optimizer.zero_grad()
-            
-            # Forward pass
-            output = model(src, tgt) # Output shape: [batch, seq_len, vocab_size]
+            optimizer.zero_grad(set_to_none=True)
 
-            # --- TÍNH LOSS (PHẦN QUAN TRỌNG NHẤT) ---
-            output_dim = output.shape[-1]
-            
-            # Nếu batch_first=True:
-            # output[:, 1:] bỏ qua dự đoán cho token SOS
-            # tgt[:, 1:] bỏ qua token SOS trong label thực tế
-            output_flatten = output[:, 1:, :].reshape(-1, output_dim)
-            tgt_flatten = tgt[:, 1:].reshape(-1)
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                output = model(src, tgt, teacher_forcing_ratio=config.teacher_forcing_ratio)
+                output_dim = output.shape[-1]
 
-            loss = criterion(output_flatten, tgt_flatten)
-            
-            loss.backward()
-            # Clip gradient để tránh nổ gradient (Exploding Gradients)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1)
-            optimizer.step()
+                output_flatten = output[:, 1:, :].reshape(-1, output_dim)
+                tgt_flatten = tgt[:, 1:].reshape(-1)
 
-            total_loss += loss.item()
-            progress_bar.set_postfix({"loss": loss.item()})
-            wandb.log({"batch_loss": loss.item()})
-            
-        avg_loss = total_loss / len(dataloader)
-        print(f"Kết thúc Epoch {epoch+1} - Average Loss: {avg_loss:.4f}")
-        wandb.log({"epoch_loss": avg_loss, "epoch": epoch + 1})
-        
-        # Lưu trọng số sau mỗi Epoch
-        torch.save(model.state_dict(), f"weights/model_epoch_{epoch+1}.pth")
+                loss = criterion(output_flatten, tgt_flatten)
 
-    print("Huấn luyện hoàn tất! Từ điển và trọng số đã sẵn sàng tại thư mục weights/.")
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+
+            total_train_loss += loss.item()
+            global_step += 1
+
+            progress_bar.set_postfix({"train_loss": f"{loss.item():.4f}"})
+
+            if global_step % config.log_every == 0:
+                wandb.log({
+                    "batch_train_loss": loss.item(),
+                    "global_step": global_step
+                })
+
+        avg_train_loss = total_train_loss / len(train_loader)
+        val_loss = evaluate(model, val_loader, criterion, device)
+        epoch_time = time.time() - epoch_start
+
+        print(
+            f"Epoch {epoch + 1} done | "
+            f"train_loss={avg_train_loss:.4f} | "
+            f"val_loss={val_loss:.4f} | "
+            f"time={epoch_time:.2f}s"
+        )
+
+        wandb.log({
+            "epoch": epoch + 1,
+            "train_loss": avg_train_loss,
+            "val_loss": val_loss,
+            "epoch_time_sec": epoch_time
+        })
+
+        torch.save(model.state_dict(), f"weights/model_epoch_{epoch + 1}.pth")
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save(model.state_dict(), "weights/best_model.pth")
+            print(f"Saved new best model with val_loss={best_val_loss:.4f}")
+
+    print("Training finished.")
     wandb.finish()
+
 
 if __name__ == "__main__":
     train()
