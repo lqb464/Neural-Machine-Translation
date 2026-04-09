@@ -52,7 +52,7 @@ def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Training on device: {device}")
 
-    processed_dir = "/kaggle/input/datasets/lqb464/dataset/processed"
+    processed_dir = "data/processed"
     train_path = os.path.join(processed_dir, "train.pt")
     val_path = os.path.join(processed_dir, "val.pt")
     vocab_path = os.path.join(processed_dir, "vocabs.pt")

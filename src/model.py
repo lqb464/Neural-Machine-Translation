@@ -1,131 +1,79 @@
-import os
 import torch
-import pandas as pd
-from collections import Counter
+import torch.nn as nn
+import torch.nn.functional as F
+import random
 
 
-class Vocab:
-    def __init__(self, name):
-        self.name = name
-        self.word2idx = {"<PAD>": 0, "<SOS>": 1, "<EOS>": 2, "<UNK>": 3}
-        self.idx2word = {0: "<PAD>", 1: "<SOS>", 2: "<EOS>", 3: "<UNK>"}
-        self.num_words = 4
+class Encoder(nn.Module):
+    def __init__(self, vocab_size, embed_dim, hidden_dim, n_layers=1):
+        super(Encoder, self).__init__()
+        self.hidden_dim = hidden_dim
+        self.n_layers = n_layers
 
-    def build_vocab(self, sentences, max_vocab_size=30000):
-        word_counter = Counter()
-        for sentence in sentences:
-            words = str(sentence).split()
-            word_counter.update(words)
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.gru = nn.GRU(embed_dim, hidden_dim, n_layers, batch_first=True)
 
-        most_common_words = word_counter.most_common(max_vocab_size - self.num_words)
-
-        for word, _ in most_common_words:
-            if word not in self.word2idx:
-                self.word2idx[word] = self.num_words
-                self.idx2word[self.num_words] = word
-                self.num_words += 1
-
-        print(f"Vocab [{self.name}] size: {self.num_words}")
-
-    def encode(self, sentence, max_len):
-        words = str(sentence).split()
-
-        idx_list = [self.word2idx["<SOS>"]]
-        for word in words:
-            idx_list.append(self.word2idx.get(word, self.word2idx["<UNK>"]))
-        idx_list.append(self.word2idx["<EOS>"])
-
-        if len(idx_list) > max_len:
-            idx_list = idx_list[:max_len - 1] + [self.word2idx["<EOS>"]]
-
-        return idx_list
+    def forward(self, x):
+        embedded = self.embedding(x)
+        outputs, hidden = self.gru(embedded)
+        return outputs, hidden
 
 
-def encode_dataframe(df, src_vocab, tgt_vocab, src_col="en", tgt_col="vi", max_len=70):
-    samples = []
+class LuongAttention(nn.Module):
+    def __init__(self, hidden_dim):
+        super(LuongAttention, self).__init__()
+        self.wa = nn.Linear(hidden_dim, hidden_dim)
 
-    src_sentences = df[src_col].tolist()
-    tgt_sentences = df[tgt_col].tolist()
-
-    for src_sentence, tgt_sentence in zip(src_sentences, tgt_sentences):
-        src_ids = src_vocab.encode(src_sentence, max_len=max_len)
-        tgt_ids = tgt_vocab.encode(tgt_sentence, max_len=max_len)
-
-        samples.append({
-            "src_ids": src_ids,
-            "tgt_ids": tgt_ids,
-            "src_len": len(src_ids),
-            "tgt_len": len(tgt_ids)
-        })
-
-    return samples
+    def forward(self, decoder_hidden, encoder_outputs):
+        decoder_hidden_permuted = decoder_hidden.permute(1, 2, 0)
+        score = self.wa(encoder_outputs)
+        scores = torch.bmm(score, decoder_hidden_permuted)
+        attention_weights = F.softmax(scores, dim=1)
+        context = torch.bmm(attention_weights.permute(0, 2, 1), encoder_outputs)
+        return context, attention_weights
 
 
-def main():
-    raw_dir = "data/raw"
-    processed_dir = "data/processed"
-    os.makedirs(processed_dir, exist_ok=True)
+class Decoder(nn.Module):
+    def __init__(self, vocab_size, embed_dim, hidden_dim, n_layers=1):
+        super(Decoder, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embed_dim)
+        self.gru = nn.GRU(embed_dim + hidden_dim, hidden_dim, n_layers, batch_first=True)
+        self.attention = LuongAttention(hidden_dim)
+        self.out = nn.Linear(hidden_dim * 2, vocab_size)
 
-    train_path = os.path.join(raw_dir, "train.json")
-    valid_path = os.path.join(raw_dir, "valid.json")
-    test_path = os.path.join(raw_dir, "test.json")
-
-    print("Loading raw data...")
-    train_df = pd.read_json(train_path)
-    valid_df = pd.read_json(valid_path)
-    test_df = pd.read_json(test_path)
-
-    max_len = 70
-    en_vocab_size = 20000
-    vi_vocab_size = 25000
-
-    print("Building vocab from train split only...")
-    en_vocab = Vocab(name="English")
-    en_vocab.build_vocab(train_df["en"].values, max_vocab_size=en_vocab_size)
-
-    vi_vocab = Vocab(name="Vietnamese")
-    vi_vocab.build_vocab(train_df["vi"].values, max_vocab_size=vi_vocab_size)
-
-    print("Encoding train/valid/test...")
-    train_samples = encode_dataframe(train_df, en_vocab, vi_vocab, max_len=max_len)
-    valid_samples = encode_dataframe(valid_df, en_vocab, vi_vocab, max_len=max_len)
-    test_samples = encode_dataframe(test_df, en_vocab, vi_vocab, max_len=max_len)
-
-    vocab_data = {
-        "src_vocab": {
-            "word2idx": en_vocab.word2idx,
-            "idx2word": en_vocab.idx2word,
-            "num_words": en_vocab.num_words
-        },
-        "tgt_vocab": {
-            "word2idx": vi_vocab.word2idx,
-            "idx2word": vi_vocab.idx2word,
-            "num_words": vi_vocab.num_words
-        },
-        "special_tokens": {
-            "pad": 0,
-            "sos": 1,
-            "eos": 2,
-            "unk": 3
-        },
-        "meta": {
-            "max_len": max_len
-        }
-    }
-
-    print("Saving processed files...")
-    torch.save(train_samples, os.path.join(processed_dir, "train.pt"))
-    torch.save(valid_samples, os.path.join(processed_dir, "valid.pt"))
-    torch.save(test_samples, os.path.join(processed_dir, "test.pt"))
-    torch.save(vocab_data, os.path.join(processed_dir, "vocabs.pt"))
-
-    print("Done.")
-    print(f"Train samples: {len(train_samples)}")
-    print(f"Valid samples: {len(valid_samples)}")
-    print(f"Test samples: {len(test_samples)}")
-    print(f"EN vocab size: {en_vocab.num_words}")
-    print(f"VI vocab size: {vi_vocab.num_words}")
+    def forward(self, x, hidden, encoder_outputs):
+        embedded = self.embedding(x)
+        context, attn_weights = self.attention(hidden, encoder_outputs)
+        rnn_input = torch.cat((embedded, context), dim=2)
+        output, hidden = self.gru(rnn_input, hidden)
+        output = torch.cat((output, context), dim=2)
+        prediction = self.out(output.squeeze(1))
+        return prediction, hidden, attn_weights
 
 
-if __name__ == "__main__":
-    main()
+class Seq2Seq(nn.Module):
+    def __init__(self, encoder, decoder, device):
+        super(Seq2Seq, self).__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.device = device
+
+    def forward(self, src, tgt, teacher_forcing_ratio=0.5):
+        batch_size = src.shape[0]
+        max_len = tgt.shape[1]
+        tgt_vocab_size = self.decoder.out.out_features
+
+        outputs = torch.zeros(batch_size, max_len, tgt_vocab_size, device=self.device)
+
+        encoder_outputs, hidden = self.encoder(src)
+        decoder_input = tgt[:, 0].unsqueeze(1)
+
+        for t in range(1, max_len):
+            prediction, hidden, _ = self.decoder(decoder_input, hidden, encoder_outputs)
+            outputs[:, t, :] = prediction
+
+            top1 = prediction.argmax(1)
+            use_teacher_forcing = random.random() < teacher_forcing_ratio
+            decoder_input = tgt[:, t].unsqueeze(1) if use_teacher_forcing else top1.unsqueeze(1)
+
+        return outputs
