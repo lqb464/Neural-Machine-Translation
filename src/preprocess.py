@@ -1,4 +1,5 @@
 import os
+import random
 import torch
 import pandas as pd
 from collections import Counter
@@ -41,6 +42,21 @@ class Vocab:
         return idx_list
 
 
+def split_train_val(df, val_ratio=0.1, seed=42):
+    indices = list(range(len(df)))
+    rng = random.Random(seed)
+    rng.shuffle(indices)
+
+    val_size = int(len(df) * val_ratio)
+    val_indices = indices[:val_size]
+    train_indices = indices[val_size:]
+
+    train_df = df.iloc[train_indices].reset_index(drop=True)
+    val_df = df.iloc[val_indices].reset_index(drop=True)
+
+    return train_df, val_df
+
+
 def encode_dataframe(df, src_vocab, tgt_vocab, src_col="en", tgt_col="vi", max_len=70):
     samples = []
 
@@ -66,18 +82,22 @@ def main():
     processed_dir = "data/processed"
     os.makedirs(processed_dir, exist_ok=True)
 
-    train_path = os.path.join(raw_dir, "train.json")
-    valid_path = os.path.join(raw_dir, "valid.json")
-    test_path = os.path.join(raw_dir, "test.json")
+    raw_train_path = os.path.join(raw_dir, "train.json")
 
-    print("Loading raw data...")
-    train_df = pd.read_json(train_path)
-    valid_df = pd.read_json(valid_path)
-    test_df = pd.read_json(test_path)
+    print("Loading raw train data...")
+    df = pd.read_json(raw_train_path)
 
     max_len = 70
     en_vocab_size = 20000
     vi_vocab_size = 25000
+    val_ratio = 0.1
+    split_seed = 42
+
+    print("Splitting train/val...")
+    train_df, val_df = split_train_val(df, val_ratio=val_ratio, seed=split_seed)
+
+    print(f"Train size: {len(train_df)}")
+    print(f"Val size: {len(val_df)}")
 
     print("Building vocab from train split only...")
     en_vocab = Vocab(name="English")
@@ -86,10 +106,9 @@ def main():
     vi_vocab = Vocab(name="Vietnamese")
     vi_vocab.build_vocab(train_df["vi"].values, max_vocab_size=vi_vocab_size)
 
-    print("Encoding train/valid/test...")
+    print("Encoding train and val...")
     train_samples = encode_dataframe(train_df, en_vocab, vi_vocab, max_len=max_len)
-    valid_samples = encode_dataframe(valid_df, en_vocab, vi_vocab, max_len=max_len)
-    test_samples = encode_dataframe(test_df, en_vocab, vi_vocab, max_len=max_len)
+    val_samples = encode_dataframe(val_df, en_vocab, vi_vocab, max_len=max_len)
 
     vocab_data = {
         "src_vocab": {
@@ -109,20 +128,20 @@ def main():
             "unk": 3
         },
         "meta": {
-            "max_len": max_len
+            "max_len": max_len,
+            "val_ratio": val_ratio,
+            "split_seed": split_seed
         }
     }
 
     print("Saving processed files...")
     torch.save(train_samples, os.path.join(processed_dir, "train.pt"))
-    torch.save(valid_samples, os.path.join(processed_dir, "valid.pt"))
-    torch.save(test_samples, os.path.join(processed_dir, "test.pt"))
+    torch.save(val_samples, os.path.join(processed_dir, "val.pt"))
     torch.save(vocab_data, os.path.join(processed_dir, "vocabs.pt"))
 
     print("Done.")
     print(f"Train samples: {len(train_samples)}")
-    print(f"Valid samples: {len(valid_samples)}")
-    print(f"Test samples: {len(test_samples)}")
+    print(f"Val samples: {len(val_samples)}")
     print(f"EN vocab size: {en_vocab.num_words}")
     print(f"VI vocab size: {vi_vocab.num_words}")
 

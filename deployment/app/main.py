@@ -22,7 +22,7 @@ def load_model():
         vi_vocab = pickle.load(f)
         
     translator = Translator(
-        model_path="weights/model_epoch_10.pth",
+        model_path="weights/model_epoch_5.pth",
         en_vocab=en_vocab,
         vi_vocab=vi_vocab,
         device="cpu" # FastAPI thường chạy trên CPU để tiết kiệm chi phí
